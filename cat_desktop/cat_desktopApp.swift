@@ -1,17 +1,20 @@
-//
-//  cat_desktopApp.swift
-//  cat_desktop
-//
-//  Created by puzhen on 27.02.26.
-//
-
 import SwiftUI
 
 @main
 struct cat_desktopApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(.hiddenTitleBar)
+    }
+}
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hide from dock and Cmd+Tab
+        NSApp.setActivationPolicy(.accessory)
     }
 }
