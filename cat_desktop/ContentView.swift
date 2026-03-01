@@ -3,9 +3,28 @@ import AVFoundation
 
 // MARK: - Main View
 
-enum CatVideo: String {
-    case steal = "cat_animation"  // click: cat steals fish
-    case pat = "cat_pat"          // tap detected: cat gets patted
+enum CatVideo: String, CaseIterable {
+    case steal = "cat_animation"
+    case pat = "cat_pat"
+    case sleep = "cat_sleep"
+    case snore = "cat_snore"
+    case roll = "cat_roll"
+
+    var emoji: String {
+        switch self {
+        case .steal: "🐟"
+        case .pat:   "🐱"
+        case .sleep: "😴"
+        case .snore: "💤"
+        case .roll:  "🙀"
+        }
+    }
+
+    static var tapVideos: [CatVideo] { [.pat, .sleep] }
+
+    static func randomTapVideo() -> CatVideo {
+        tapVideos.randomElement()!
+    }
 }
 
 struct ContentView: View {
@@ -16,34 +35,39 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            if let image = catImage {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 400, height: 225)
-                    .opacity(videoReady ? 0 : 1)
-            }
+            // Cat image / video area
+            ZStack {
+                if let image = catImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: 400, height: 225)
+                        .opacity(videoReady ? 0 : 1)
+                }
 
-            if let video = currentVideo {
-                VideoPlayerView(
-                    videoName: video.rawValue,
-                    onReady: { videoReady = true },
-                    onFinished: {
-                        currentVideo = nil
-                        videoReady = false
-                    }
-                )
-                    .frame(width: 400, height: 225)
-                    .id(video.rawValue)
+                if let video = currentVideo {
+                    VideoPlayerView(
+                        videoName: video.rawValue,
+                        onReady: { videoReady = true },
+                        onFinished: {
+                            currentVideo = nil
+                            videoReady = false
+                        }
+                    )
+                        .frame(width: 400, height: 225)
+                        .id(video.rawValue)
+                }
             }
         }
-        .transaction { t in t.animation = nil }
         .frame(width: 400, height: 280)
         .overlay(
-            DragAndClickView(onClick: {
-                if currentVideo == nil { playVideo(.steal) }
-            })
+            DragAndClickView(
+                isPlaying: currentVideo != nil,
+                onClick: { video in
+                    if currentVideo == nil { playVideo(video) }
+                }
+            )
         )
         .background(WindowConfigurator())
         .contextMenu {
@@ -52,7 +76,7 @@ struct ContentView: View {
         .onAppear {
             loadCatImage()
             tapDetector.onTapDetected = {
-                if currentVideo == nil { playVideo(.pat) }
+                if currentVideo == nil { playVideo(.randomTapVideo()) }
             }
             tapDetector.start()
         }
@@ -127,26 +151,177 @@ class TapDetector {
     deinit { stop() }
 }
 
-// MARK: - Native Drag & Click (smooth window dragging via NSEvent)
+// MARK: - Native Drag & Click with Arc Emoji Buttons
 
 struct DragAndClickView: NSViewRepresentable {
-    let onClick: () -> Void
+    let isPlaying: Bool
+    let onClick: (CatVideo) -> Void
 
     func makeNSView(context: Context) -> _DragClickNSView {
         let view = _DragClickNSView()
-        view.onClick = onClick
+        view.onVideoSelected = onClick
+        view.isPlaying = isPlaying
         return view
     }
 
     func updateNSView(_ nsView: _DragClickNSView, context: Context) {
-        nsView.onClick = onClick
+        nsView.onVideoSelected = onClick
+        nsView.isPlaying = isPlaying
+        if isPlaying {
+            nsView.hideButtons()
+        }
+    }
+}
+
+class _EmojiButton: NSView {
+    let video: CatVideo
+    var isHighlighted = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(video: CatVideo) {
+        self.video = video
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 18
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.15
+        layer?.shadowRadius = 4
+        layer?.shadowOffset = CGSize(width: 0, height: -2)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 36, height: 36) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let bg = isHighlighted ? NSColor.white : NSColor.white.withAlphaComponent(0.85)
+        bg.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 18, yRadius: 18).fill()
+
+        let emoji = video.emoji as NSString
+        let font = NSFont.systemFont(ofSize: 18)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let size = emoji.size(withAttributes: attrs)
+        let point = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
+        emoji.draw(at: point, withAttributes: attrs)
     }
 }
 
 class _DragClickNSView: NSView {
-    var onClick: (() -> Void)?
+    var onVideoSelected: ((CatVideo) -> Void)?
+    var isPlaying = false
     private var mouseDownLocation: NSPoint = .zero
     private let dragThreshold: CGFloat = 3.0
+    private var trackingArea: NSTrackingArea?
+    private var isHovering = false
+    private var emojiButtons: [_EmojiButton] = []
+    private var hoveredButton: _EmojiButton?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupButtons()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setupButtons() {
+        for video in CatVideo.allCases {
+            let btn = _EmojiButton(video: video)
+            btn.frame = NSRect(x: 0, y: 0, width: 36, height: 36)
+            btn.isHidden = true
+            btn.alphaValue = 0
+            addSubview(btn)
+            emojiButtons.append(btn)
+        }
+    }
+
+    private func layoutButtons() {
+        let centerX = bounds.midX
+        let topY = bounds.maxY - 30
+        let arcRadius: CGFloat = 70
+        let count = emojiButtons.count
+        // Arc from 210° to 330° (centered at top, opening downward like a fan above)
+        let startAngle = CGFloat.pi * 7 / 6   // 210°
+        let endAngle = CGFloat.pi * 11 / 6    // 330°
+
+        for (i, btn) in emojiButtons.enumerated() {
+            let t = count > 1 ? CGFloat(i) / CGFloat(count - 1) : 0.5
+            let angle = startAngle + t * (endAngle - startAngle)
+            let x = centerX + arcRadius * cos(angle) - 18
+            let y = topY + arcRadius * sin(angle) - 18
+            btn.frame = NSRect(x: x, y: y, width: 36, height: 36)
+        }
+    }
+
+    func showButtons() {
+        layoutButtons()
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.2
+            for btn in emojiButtons {
+                btn.isHidden = false
+                btn.animator().alphaValue = 1
+            }
+        })
+    }
+
+    func hideButtons() {
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            for btn in emojiButtons {
+                btn.animator().alphaValue = 0
+            }
+        }, completionHandler: {
+            for btn in self.emojiButtons {
+                btn.isHidden = true
+            }
+        })
+        hoveredButton?.isHighlighted = false
+        hoveredButton = nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let old = trackingArea { removeTrackingArea(old) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
+            owner: self, userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard !isPlaying else { return }
+        isHovering = true
+        showButtons()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        hideButtons()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        let hit = emojiButtons.first { !$0.isHidden && $0.frame.contains(loc) }
+        if hit !== hoveredButton {
+            hoveredButton?.isHighlighted = false
+            hoveredButton = hit
+            hoveredButton?.isHighlighted = true
+        }
+        if hit != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    private func buttonAt(_ event: NSEvent) -> _EmojiButton? {
+        let loc = convert(event.locationInWindow, from: nil)
+        return emojiButtons.first { !$0.isHidden && $0.frame.contains(loc) }
+    }
 
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = NSEvent.mouseLocation
@@ -168,8 +343,17 @@ class _DragClickNSView: NSView {
         let current = NSEvent.mouseLocation
         let dx = abs(current.x - mouseDownLocation.x)
         let dy = abs(current.y - mouseDownLocation.y)
-        if dx < dragThreshold && dy < dragThreshold {
-            onClick?()
+        guard dx < dragThreshold && dy < dragThreshold else { return }
+
+        // Check if clicked on an emoji button
+        if let btn = buttonAt(event), !btn.isHidden {
+            onVideoSelected?(btn.video)
+            return
+        }
+
+        // Default click: random video
+        if !isPlaying {
+            onVideoSelected?(CatVideo.allCases.randomElement()!)
         }
     }
 }
